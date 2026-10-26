@@ -1,0 +1,6 @@
+# keep installer scripts and readme texts byte-exact (CRLF, UTF-8 BOM)
+*.cmd -text
+*.ps1 -text
+*.txt -text
+*.json -text
+*.jpg binary
