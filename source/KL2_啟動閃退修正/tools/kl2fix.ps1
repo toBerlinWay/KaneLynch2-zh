@@ -13,30 +13,66 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $PSScriptRoot
-$ORIG = '9fceef967752070fe98755b52c8f8475b631c92531eaa5d43f7fa3c09c176c6f'   # Steam 版原始 kl2.exe
+$ORIGS = @{                                                                   # 已知的原始 kl2.exe
+    '9fceef967752070fe98755b52c8f8475b631c92531eaa5d43f7fa3c09c176c6f' = 'Steam'
+    'e34046a4c5605b89a40daddf4c65928335a08f90e000ebad25ecf56d83d8d285' = 'GOG'
+}
 $Domain = 'kl2-pc-game-content.eidos.co.uk'
 $HostLine = "127.0.0.1 $Domain"
 $Hosts = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
-$Folder = 'Kane & Lynch 2 - Dog Days'
+$Folder = 'Kane & Lynch 2 - Dog Days'                                         # Steam 資料夾名
+$GogFolder = 'Kane & Lynch 2 Dog Days'                                        # GOG 資料夾名
+$GogId = '2057392130'
 $L1 = [Text.Encoding]::GetEncoding(28591)                                   # 1 byte = 1 char, string index = file offset
-function Sig([int]$csidl) { $L1.GetString([byte[]](0x6a,0,0x6a,0,0x6a,$csidl,0x6a,0,0xc7,0x44,0x24,0x20,0,0,0,0,0xff,0x15,0x48,0x05,0xb1,0)) }
+# push 0; push 0; push <CSIDL>; push 0; mov [esp+20h],0; call [SHGetFolderPathA]（不含匯入表位址，Steam／GOG 通用）
+function Sig([int]$csidl) { $L1.GetString([byte[]](0x6a,0,0x6a,0,0x6a,$csidl,0x6a,0,0xc7,0x44,0x24,0x20,0,0,0,0,0xff,0x15)) }
 
-function Find-GameDir {
-    if ($GameDir -and (Test-Path -LiteralPath (Join-Path $GameDir 'kl2.exe'))) { return (Resolve-Path -LiteralPath $GameDir).Path }
-    $up = Split-Path -Parent $Root
-    if ($up -and (Test-Path -LiteralPath (Join-Path $up 'kl2.exe'))) { return $up }
-    $libs = @()
+function Get-Kind([string]$d) {
+    if (Test-Path -LiteralPath (Join-Path $d 'Galaxy.dll')) { return 'GOG' }
+    if (Test-Path -LiteralPath (Join-Path $d 'steam_api.dll')) { return 'Steam' }
+    return '?'
+}
+function Get-GameCandidates {
+    $c = New-Object System.Collections.Generic.List[string]
     try {
         $steam = (Get-ItemProperty -Path 'HKCU:\Software\Valve\Steam' -Name SteamPath -ErrorAction Stop).SteamPath -replace '/', '\'
-        $libs += $steam
+        $libs = @($steam)
         $vdf = Join-Path $steam 'steamapps\libraryfolders.vdf'
         if (Test-Path -LiteralPath $vdf) {
             foreach ($mt in [regex]::Matches((Get-Content -LiteralPath $vdf -Raw), '"path"\s+"([^"]+)"')) { $libs += ($mt.Groups[1].Value -replace '\\\\', '\') }
         }
+        foreach ($l in $libs) { $c.Add((Join-Path $l ('steamapps\common\' + $Folder))) }
     } catch { }
-    foreach ($l in $libs | Select-Object -Unique) {
-        $p = Join-Path $l ('steamapps\common\' + $Folder)
-        if (Test-Path -LiteralPath (Join-Path $p 'kl2.exe')) { return $p }
+    foreach ($k in ('HKLM:\SOFTWARE\WOW6432Node\GOG.com\Games\' + $GogId), ('HKLM:\SOFTWARE\GOG.com\Games\' + $GogId), ('HKCU:\SOFTWARE\GOG.com\Games\' + $GogId)) {
+        try { $gp = (Get-ItemProperty -Path $k -ErrorAction Stop).path; if ($gp) { $c.Add($gp) } } catch { }
+    }
+    foreach ($dr in [IO.DriveInfo]::GetDrives()) {
+        if ($dr.DriveType -ne 'Fixed' -or -not $dr.IsReady) { continue }
+        $r = $dr.RootDirectory.FullName
+        foreach ($sub in $GogFolder, ('GOG Games\' + $GogFolder), ('GOG Galaxy\Games\' + $GogFolder), ('Program Files (x86)\GOG Galaxy\Games\' + $GogFolder)) { $c.Add((Join-Path $r $sub)) }
+    }
+    $seen = @{}
+    foreach ($d in $c) {
+        if (-not (Test-Path -LiteralPath (Join-Path $d 'kl2.exe'))) { continue }
+        $full = (Resolve-Path -LiteralPath $d).Path.TrimEnd('\')
+        if (-not $seen.ContainsKey($full.ToLowerInvariant())) { $seen[$full.ToLowerInvariant()] = 1; $full }
+    }
+}
+function Find-GameDir {
+    if ($GameDir) {
+        if (Test-Path -LiteralPath (Join-Path $GameDir 'kl2.exe')) { return (Resolve-Path -LiteralPath $GameDir).Path }
+        throw '指定的資料夾裡沒有 kl2.exe。'
+    }
+    $up = Split-Path -Parent $Root
+    if ($up -and (Test-Path -LiteralPath (Join-Path $up 'kl2.exe'))) { return $up }
+    $list = @(Get-GameCandidates)
+    if ($list.Count -eq 1) { return $list[0] }
+    if ($list.Count -gt 1) {
+        Write-Host '找到多個遊戲資料夾：'
+        for ($i = 0; $i -lt $list.Count; $i++) { Write-Host ('  {0}) [{1}] {2}' -f ($i + 1), (Get-Kind $list[$i]), $list[$i]) }
+        $n = 0
+        if ([int]::TryParse((Read-Host '請輸入編號').Trim(), [ref]$n) -and $n -ge 1 -and $n -le $list.Count) { return $list[$n - 1] }
+        throw '沒有選擇遊戲資料夾。'
     }
     $p = (Read-Host '找不到遊戲資料夾，請貼上路徑（裡面要有 kl2.exe）').Trim('"', ' ')
     if (Test-Path -LiteralPath (Join-Path $p 'kl2.exe')) { return $p }
@@ -72,9 +108,9 @@ try {
         exit 0
     }
 
-    Write-Host '《Kane & Lynch 2: Dog Days》啟動閃退＋存檔修正'
+    Write-Host '《Kane & Lynch 2: Dog Days》啟動閃退＋存檔修正（Steam／GOG 通用）'
     $game = Find-GameDir
-    Write-Host ('遊戲資料夾：' + $game)
+    Write-Host ('遊戲資料夾：' + $game + '（' + (Get-Kind $game) + ' 版）')
     if (Get-Process kl2 -ErrorAction SilentlyContinue) { throw '遊戲正在執行，請先關閉。' }
     $exe = Join-Path $game 'kl2.exe'
     $bk = Join-Path $game 'KL2_fix_backup\kl2.exe'
@@ -92,7 +128,7 @@ try {
             $o = [byte[]]$b.Clone()
             if ($pNew -ge 0) { $o[$pNew + 10] = [byte][char]'e' }
             if ($svPos -ge 0) { $o[$svPos] = 0x05 }
-            if ((Get-ShaBytes $o) -ne $ORIG) { Write-Warning 'kl2.exe 不是已知的 Steam 版，仍嘗試修正（已備份目前的檔案）。'; $o = $b }
+            if (-not $ORIGS.ContainsKey((Get-ShaBytes $o))) { Write-Warning 'kl2.exe 不是已知的 Steam／GOG 版，仍嘗試修正（已備份目前的檔案）。'; $o = $b }
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $bk) | Out-Null
             [IO.File]::WriteAllBytes($bk, $o)
         }
@@ -135,7 +171,8 @@ try {
             if ($svPos -ge 0) { $b[$svPos] = 0x05 }
             [IO.File]::WriteAllBytes($exe, $b)
         }
-        Write-Host ('1) kl2.exe 已還原' + $(if ((Get-Sha $exe) -eq $ORIG) { '成 Steam 原版。' } else { '。' }))
+        $kind = $ORIGS[(Get-Sha $exe)]
+        Write-Host ('1) kl2.exe 已還原' + $(if ($kind) { '成 ' + $kind + ' 原版。' } else { '。' }))
         if ($NoHosts) { Write-Host '2) 略過 hosts。' }
         elseif (Test-HostLine) {
             Write-Host '2) 要從 hosts 移除那一行，接下來 Windows 會詢問管理員權限，請按「是」。'

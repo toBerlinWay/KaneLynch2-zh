@@ -140,7 +140,7 @@ public static class Engine {
     public static void PatchZip(string zipPath, long origSize, string origSha, bool ioiTail, string gameDir, string dataDir,
                                 string[] names, string[] srcZips, string[] srcEntries, string[] deltas, string[] fulls, bool alreadyChecked) {
         int st = alreadyChecked ? (new FileInfo(zipPath).Length > origSize ? 1 : 0) : CheckOriginal(zipPath, origSize, origSha);
-        if (st < 0) throw new Exception("檔案與支援的 Steam 版不符：" + zipPath);
+        if (st < 0) throw new Exception("檔案和支援的版本不符：" + zipPath);
         if (st == 1) Truncate(zipPath, origSize);
         bool ok = false;
         try {
@@ -210,22 +210,57 @@ public static class Engine {
 }
 '@
 
-function Find-GameDir {
-    if ($GameDir -and (Test-Path -LiteralPath (Join-Path $GameDir 'kl2.exe'))) { return (Resolve-Path -LiteralPath $GameDir).Path }
-    $up = Split-Path -Parent $Root
-    if ($up -and (Test-Path -LiteralPath (Join-Path $up 'kl2.exe'))) { return $up }
-    $libs = @()
+$GogId = '2057392130'
+$GogFolder = 'Kane & Lynch 2 Dog Days'
+
+function Get-Kind([string]$d) {
+    if (Test-Path -LiteralPath (Join-Path $d 'Galaxy.dll')) { return 'GOG' }
+    if (Test-Path -LiteralPath (Join-Path $d 'steam_api.dll')) { return 'Steam' }
+    return '?'
+}
+
+function Get-GameCandidates {
+    $c = New-Object System.Collections.Generic.List[string]
     try {
         $steam = (Get-ItemProperty -Path 'HKCU:\Software\Valve\Steam' -Name SteamPath -ErrorAction Stop).SteamPath -replace '/', '\'
-        $libs += $steam
+        $libs = @($steam)
         $vdf = Join-Path $steam 'steamapps\libraryfolders.vdf'
         if (Test-Path -LiteralPath $vdf) {
             foreach ($mt in [regex]::Matches((Get-Content -LiteralPath $vdf -Raw), '"path"\s+"([^"]+)"')) { $libs += ($mt.Groups[1].Value -replace '\\\\', '\') }
         }
+        foreach ($l in $libs) { $c.Add((Join-Path $l ('steamapps\common\' + $M.game_folder))) }
     } catch { }
-    foreach ($l in $libs | Select-Object -Unique) {
-        $p = Join-Path $l ('steamapps\common\' + $M.game_folder)
-        if (Test-Path -LiteralPath (Join-Path $p 'kl2.exe')) { return $p }
+    foreach ($k in ('HKLM:\SOFTWARE\WOW6432Node\GOG.com\Games\' + $GogId), ('HKLM:\SOFTWARE\GOG.com\Games\' + $GogId), ('HKCU:\SOFTWARE\GOG.com\Games\' + $GogId)) {
+        try { $gp = (Get-ItemProperty -Path $k -ErrorAction Stop).path; if ($gp) { $c.Add($gp) } } catch { }
+    }
+    foreach ($dr in [IO.DriveInfo]::GetDrives()) {
+        if ($dr.DriveType -ne 'Fixed' -or -not $dr.IsReady) { continue }
+        $r = $dr.RootDirectory.FullName
+        foreach ($sub in $GogFolder, ('GOG Games\' + $GogFolder), ('GOG Galaxy\Games\' + $GogFolder), ('Program Files (x86)\GOG Galaxy\Games\' + $GogFolder)) { $c.Add((Join-Path $r $sub)) }
+    }
+    $seen = @{}
+    foreach ($d in $c) {
+        if (-not (Test-Path -LiteralPath (Join-Path $d 'kl2.exe'))) { continue }
+        $full = (Resolve-Path -LiteralPath $d).Path.TrimEnd('\')
+        if (-not $seen.ContainsKey($full.ToLowerInvariant())) { $seen[$full.ToLowerInvariant()] = 1; $full }
+    }
+}
+
+function Find-GameDir {
+    if ($GameDir) {
+        if (Test-Path -LiteralPath (Join-Path $GameDir 'kl2.exe')) { return (Resolve-Path -LiteralPath $GameDir).Path }
+        throw '指定的資料夾裡沒有 kl2.exe。'
+    }
+    $up = Split-Path -Parent $Root
+    if ($up -and (Test-Path -LiteralPath (Join-Path $up 'kl2.exe'))) { return $up }
+    $list = @(Get-GameCandidates)
+    if ($list.Count -eq 1) { return $list[0] }
+    if ($list.Count -gt 1) {
+        Write-Host '找到多個遊戲資料夾：'
+        for ($i = 0; $i -lt $list.Count; $i++) { Write-Host ('  {0}) [{1}] {2}' -f ($i + 1), (Get-Kind $list[$i]), $list[$i]) }
+        $n = 0
+        if ([int]::TryParse((Read-Host '請輸入要安裝的編號').Trim(), [ref]$n) -and $n -ge 1 -and $n -le $list.Count) { return $list[$n - 1] }
+        throw '沒有選擇遊戲資料夾。'
     }
     $p = (Read-Host '找不到遊戲資料夾，請貼上路徑（裡面要有 kl2.exe）').Trim('"', ' ')
     if (Test-Path -LiteralPath (Join-Path $p 'kl2.exe')) { return $p }
@@ -233,48 +268,64 @@ function Find-GameDir {
 }
 
 function Get-Sha([string]$p) { (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLowerInvariant() }
+$VerifyHint = '請先用 Steam「驗證遊戲檔案完整性」或 GOG Galaxy「管理安裝 → 驗證／修復」把遊戲還原成原版，再重新安裝。'
+
+# 找出這個 zip 符合哪一組原檔（Steam／GOG）。回傳 @{ o = 原檔資料; st = 0 原版／1 已裝過 }，都不符回傳 $null
+function Find-Orig([string]$p, $z) {
+    foreach ($o in $z.origs) {
+        $st = [KL2.Engine]::CheckOriginal($p, [long]$o.size, [string]$o.sha256)
+        if ($st -ge 0) { return @{ o = $o; st = $st } }
+    }
+    return $null
+}
 
 try {
-    Write-Host ("《Kane & Lynch 2: Dog Days》" + $M.name + " v" + $M.version)
+    Write-Host ("《Kane & Lynch 2: Dog Days》" + $M.name + " v" + $M.version + "（Steam／GOG 通用）")
     $game = Find-GameDir
-    Write-Host ("遊戲資料夾：" + $game)
+    Write-Host ("遊戲資料夾：" + $game + "（" + (Get-Kind $game) + " 版）")
     if (Get-Process kl2 -ErrorAction SilentlyContinue) { throw '遊戲正在執行，請先關閉。' }
     $bk = Join-Path $game $BackupName
     $sw = [Diagnostics.Stopwatch]::StartNew()
 
     if ($Mode -eq 'install') {
         Write-Host '檢查遊戲檔案…'
+        $match = @{}
         foreach ($z in $M.zips) {
             $p = Join-Path $game $z.rel
-            if (-not (Test-Path -LiteralPath $p)) { throw ("找不到 " + $z.rel) }
-            if ([KL2.Engine]::CheckOriginal($p, [long]$z.orig_size, $z.orig_sha256) -lt 0) { throw ("檔案與支援的 Steam 版不符：" + $z.rel) }
+            if (-not (Test-Path -LiteralPath $p)) { throw ("找不到 " + $z.rel + "。" + $VerifyHint) }
+            $f = Find-Orig $p $z
+            if (-not $f) { throw ("檔案和支援的版本（Steam／GOG）不符：" + $z.rel + "。" + $VerifyHint) }
+            $match[$z.rel] = $f
         }
         foreach ($s in $M.sources) {
-            if ((Get-Sha (Join-Path $game $s.rel)) -ne $s.sha256) { throw ("檔案與支援的 Steam 版不符：" + $s.rel) }
+            if (@($s.sha256s) -notcontains (Get-Sha (Join-Path $game $s.rel))) { throw ("檔案和支援的版本（Steam／GOG）不符：" + $s.rel + "。" + $VerifyHint) }
         }
         foreach ($h in $M.files) {
             $p = Join-Path $game $h.rel; $b = Join-Path $bk $h.rel
             $cur = Get-Sha $p
-            if ($cur -ne $h.orig_sha256 -and $cur -ne $h.new_sha256 -and -not ((Test-Path -LiteralPath $b) -and (Get-Sha $b) -eq $h.orig_sha256)) {
-                throw ("檔案與支援的 Steam 版不符：" + $h.rel)
+            $okBackup = (Test-Path -LiteralPath $b) -and (@($h.orig_sha256s) -contains (Get-Sha $b))
+            if ((@($h.orig_sha256s) -notcontains $cur) -and $cur -ne $h.new_sha256 -and -not $okBackup) {
+                throw ("檔案和支援的版本（Steam／GOG）不符：" + $h.rel + "。" + $VerifyHint)
             }
         }
         $i = 0
         foreach ($z in $M.zips) {
             $i++
+            $f = $match[$z.rel]; $o = $f.o
             Write-Host ("[{0}/{1}] {2}" -f $i, $M.zips.Count, $z.rel)
-            $names = @($z.entries | ForEach-Object { [string]$_.name })
-            $srcz = @($z.entries | ForEach-Object { if ($_.source_zip) { [string]$_.source_zip } else { '' } })
-            $srce = @($z.entries | ForEach-Object { if ($_.source_entry) { [string]$_.source_entry } else { [string]$_.name } })
-            $dl = @($z.entries | ForEach-Object { if ($_.delta) { [string]$_.delta } else { '' } })
-            $fl = @($z.entries | ForEach-Object { if ($_.full) { [string]$_.full } else { '' } })
-            [KL2.Engine]::PatchZip((Join-Path $game $z.rel), [long]$z.orig_size, $z.orig_sha256, [bool]$z.ioi_tail, $game, $Data,
+            $ents = if ($o.entries) { $o.entries } else { $z.entries }
+            $names = @($ents | ForEach-Object { [string]$_.name })
+            $srcz = @($ents | ForEach-Object { if ($_.source_zip) { [string]$_.source_zip } else { '' } })
+            $srce = @($ents | ForEach-Object { if ($_.source_entry) { [string]$_.source_entry } else { [string]$_.name } })
+            $dl = @($ents | ForEach-Object { if ($_.delta) { [string]$_.delta } else { '' } })
+            $fl = @($ents | ForEach-Object { if ($_.full) { [string]$_.full } else { '' } })
+            [KL2.Engine]::PatchZip((Join-Path $game $z.rel), [long]$o.size, [string]$o.sha256, [bool]$o.ioi_tail, $game, $Data,
                 [string[]]$names, [string[]]$srcz, [string[]]$srce, [string[]]$dl, [string[]]$fl, $true)
         }
         Write-Host '更新字型尺寸表…'
         foreach ($h in $M.files) {
             $p = Join-Path $game $h.rel; $b = Join-Path $bk $h.rel
-            if ((Get-Sha $p) -eq $h.orig_sha256 -and -not (Test-Path -LiteralPath $b)) {
+            if ((@($h.orig_sha256s) -contains (Get-Sha $p)) -and -not (Test-Path -LiteralPath $b)) {
                 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $b) | Out-Null
                 Copy-Item -LiteralPath $p -Destination $b
             }
@@ -289,16 +340,16 @@ try {
         foreach ($z in $M.zips) {
             $i++
             $p = Join-Path $game $z.rel
-            $st = [KL2.Engine]::CheckOriginal($p, [long]$z.orig_size, $z.orig_sha256)
-            if ($st -eq 1) { [KL2.Engine]::Truncate($p, [long]$z.orig_size); Write-Host ("[{0}/{1}] 已還原 {2}" -f $i, $M.zips.Count, $z.rel) }
-            elseif ($st -lt 0) { Write-Warning ("無法辨識，略過：" + $z.rel) }
+            $f = Find-Orig $p $z
+            if (-not $f) { Write-Warning ("無法辨識，略過：" + $z.rel) }
+            elseif ($f.st -eq 1) { [KL2.Engine]::Truncate($p, [long]$f.o.size); Write-Host ("[{0}/{1}] 已還原 {2}" -f $i, $M.zips.Count, $z.rel) }
         }
         foreach ($h in $M.files) {
             $p = Join-Path $game $h.rel; $b = Join-Path $bk $h.rel
-            if ((Test-Path -LiteralPath $b) -and (Get-Sha $b) -eq $h.orig_sha256) {
+            if ((Test-Path -LiteralPath $b) -and (@($h.orig_sha256s) -contains (Get-Sha $b))) {
                 Copy-Item -LiteralPath $b -Destination $p -Force
                 Remove-Item -LiteralPath $b
-            } elseif ((Get-Sha $p) -ne $h.orig_sha256) { Write-Warning ("沒有備份，無法還原：" + $h.rel) }
+            } elseif (@($h.orig_sha256s) -notcontains (Get-Sha $p)) { Write-Warning ("沒有備份，無法還原：" + $h.rel) }
         }
         if (Test-Path -LiteralPath $bk) {
             Remove-Item -LiteralPath (Join-Path $bk 'installed.txt') -ErrorAction SilentlyContinue
