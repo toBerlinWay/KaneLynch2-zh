@@ -2,7 +2,7 @@
 
 对应 Steam 版和 GOG 版（Complete Edition）。一键安装、一键还原，不用装任何软件。另附「启动闪退＋存档修正」。
 
-**[⬇ 点这里到 Releases 下载 KaneLynch2_zh_v1.1.zip（约 61 MB）](https://github.com/toBerlinWay/KaneLynch2-zh/releases/latest)**
+**[⬇ 点这里到 Releases 下载 KaneLynch2_zh_v1.1.1.zip（约 62 MB）](https://github.com/toBerlinWay/KaneLynch2-zh/releases/latest)**
 
 > 请从 Releases 下载 zip。直接点绿色 Code → Download ZIP 下载到的只有安装脚本，没有补丁文件，装不了。
 
@@ -45,6 +45,7 @@ zip 里有三个文件夹，按需要使用：
 
 ## 更新记录
 
+- **v1.1.1**（2026-11-02）：修复安装程序在 Steam 游戏库里还记着已拔掉的硬盘时找不到游戏（只能手动贴路径）、GOG 安装路径指向已不存在的硬盘时直接报错退出的问题；启动闪退＋存档修正也一并修复。汉化内容和 v1.1 相同，已经装好的不用重装。
 - **v1.1**：支持 GOG 版（安装器会自动找 Steam／GOG 游戏文件夹，两个都有时让你选）；启动闪退＋存档修正 v1.2 也支持 GOG 版。汉化内容和 v1.0 相同。
 - **v1.0**：首次发布（Steam 版）。
 
