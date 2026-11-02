@@ -219,16 +219,20 @@ function Get-Kind([string]$d) {
     return '?'
 }
 
+# 找遊戲時只用字串組路徑：Join-Path 遇到不存在的磁碟機（例如 Steam 遊戲庫或 GOG 安裝路徑在已拔掉的硬碟上）會丟 DriveNotFoundException，
+# 在 $ErrorActionPreference = 'Stop' 下會讓後面的 Steam 遊戲庫被略過，或讓整支腳本中止。[IO.Path]::Combine 只拼字串，不檢查磁碟機。
+function Join-PathSafe([string]$a, [string]$b) { [System.IO.Path]::Combine($a, $b) }
+
 function Get-GameCandidates {
     $c = New-Object System.Collections.Generic.List[string]
     try {
         $steam = (Get-ItemProperty -Path 'HKCU:\Software\Valve\Steam' -Name SteamPath -ErrorAction Stop).SteamPath -replace '/', '\'
         $libs = @($steam)
-        $vdf = Join-Path $steam 'steamapps\libraryfolders.vdf'
+        $vdf = Join-PathSafe $steam 'steamapps\libraryfolders.vdf'
         if (Test-Path -LiteralPath $vdf) {
             foreach ($mt in [regex]::Matches((Get-Content -LiteralPath $vdf -Raw), '"path"\s+"([^"]+)"')) { $libs += ($mt.Groups[1].Value -replace '\\\\', '\') }
         }
-        foreach ($l in $libs) { $c.Add((Join-Path $l ('steamapps\common\' + $M.game_folder))) }
+        foreach ($l in $libs) { $c.Add((Join-PathSafe $l ('steamapps\common\' + $M.game_folder))) }
     } catch { }
     foreach ($k in ('HKLM:\SOFTWARE\WOW6432Node\GOG.com\Games\' + $GogId), ('HKLM:\SOFTWARE\GOG.com\Games\' + $GogId), ('HKCU:\SOFTWARE\GOG.com\Games\' + $GogId)) {
         try { $gp = (Get-ItemProperty -Path $k -ErrorAction Stop).path; if ($gp) { $c.Add($gp) } } catch { }
@@ -236,11 +240,11 @@ function Get-GameCandidates {
     foreach ($dr in [IO.DriveInfo]::GetDrives()) {
         if ($dr.DriveType -ne 'Fixed' -or -not $dr.IsReady) { continue }
         $r = $dr.RootDirectory.FullName
-        foreach ($sub in $GogFolder, ('GOG Games\' + $GogFolder), ('GOG Galaxy\Games\' + $GogFolder), ('Program Files (x86)\GOG Galaxy\Games\' + $GogFolder)) { $c.Add((Join-Path $r $sub)) }
+        foreach ($sub in $GogFolder, ('GOG Games\' + $GogFolder), ('GOG Galaxy\Games\' + $GogFolder), ('Program Files (x86)\GOG Galaxy\Games\' + $GogFolder)) { $c.Add((Join-PathSafe $r $sub)) }
     }
     $seen = @{}
     foreach ($d in $c) {
-        if (-not (Test-Path -LiteralPath (Join-Path $d 'kl2.exe'))) { continue }
+        if (-not (Test-Path -LiteralPath (Join-PathSafe $d 'kl2.exe'))) { continue }
         $full = (Resolve-Path -LiteralPath $d).Path.TrimEnd('\')
         if (-not $seen.ContainsKey($full.ToLowerInvariant())) { $seen[$full.ToLowerInvariant()] = 1; $full }
     }
@@ -248,11 +252,11 @@ function Get-GameCandidates {
 
 function Find-GameDir {
     if ($GameDir) {
-        if (Test-Path -LiteralPath (Join-Path $GameDir 'kl2.exe')) { return (Resolve-Path -LiteralPath $GameDir).Path }
+        if (Test-Path -LiteralPath (Join-PathSafe $GameDir 'kl2.exe')) { return (Resolve-Path -LiteralPath $GameDir).Path }
         throw '指定的資料夾裡沒有 kl2.exe。'
     }
     $up = Split-Path -Parent $Root
-    if ($up -and (Test-Path -LiteralPath (Join-Path $up 'kl2.exe'))) { return $up }
+    if ($up -and (Test-Path -LiteralPath (Join-PathSafe $up 'kl2.exe'))) { return $up }
     $list = @(Get-GameCandidates)
     if ($list.Count -eq 1) { return $list[0] }
     if ($list.Count -gt 1) {
@@ -263,7 +267,7 @@ function Find-GameDir {
         throw '沒有選擇遊戲資料夾。'
     }
     $p = (Read-Host '找不到遊戲資料夾，請貼上路徑（裡面要有 kl2.exe）').Trim('"', ' ')
-    if (Test-Path -LiteralPath (Join-Path $p 'kl2.exe')) { return $p }
+    if (Test-Path -LiteralPath (Join-PathSafe $p 'kl2.exe')) { return $p }
     throw '這個資料夾裡沒有 kl2.exe。'
 }
 
