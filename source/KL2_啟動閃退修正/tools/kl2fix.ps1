@@ -21,7 +21,7 @@ $Domain = 'kl2-pc-game-content.eidos.co.uk'
 $HostLine = "127.0.0.1 $Domain"
 $Hosts = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
 $Folder = 'Kane & Lynch 2 - Dog Days'                                         # Steam 資料夾名
-$GogFolder = 'Kane & Lynch 2 Dog Days'                                        # GOG 資料夾名
+$GogPattern = 'Kane*Lynch*2*'                                              # GOG 資料夾名（Galaxy：Kane & Lynch 2 Dog Days；離線安裝檔：Kane & Lynch 2- Dog Days）
 $GogId = '2057392130'
 $L1 = [Text.Encoding]::GetEncoding(28591)                                   # 1 byte = 1 char, string index = file offset
 # push 0; push 0; push <CSIDL>; push 0; mov [esp+20h],0; call [SHGetFolderPathA]（不含匯入表位址，Steam／GOG 通用）
@@ -35,6 +35,32 @@ function Get-Kind([string]$d) {
 # 找遊戲時只用字串組路徑：Join-Path 遇到不存在的磁碟機（例如 Steam 遊戲庫或 GOG 安裝路徑在已拔掉的硬碟上）會丟 DriveNotFoundException，
 # 在 $ErrorActionPreference = 'Stop' 下會讓後面的 Steam 遊戲庫被略過，或讓整支腳本中止。[IO.Path]::Combine 只拼字串，不檢查磁碟機。
 function Join-PathSafe([string]$a, [string]$b) { [System.IO.Path]::Combine($a, $b) }
+
+# 在 $base 底下找名字符合 $pattern、裡面有 kl2.exe 的資料夾；那一層沒有就再往下看一層（有些版本把遊戲放在 GameData 之類的子資料夾）。
+# $base 不存在或沒有權限就什麼都不回傳。
+function Find-GameIn([string]$base, [string]$pattern = '*') {
+    try {
+        foreach ($d in [IO.Directory]::GetDirectories($base, $pattern)) {
+            if (Test-Path -LiteralPath (Join-PathSafe $d 'kl2.exe') -PathType Leaf) { $d; continue }
+            try { foreach ($s in [IO.Directory]::GetDirectories($d)) { if (Test-Path -LiteralPath (Join-PathSafe $s 'kl2.exe') -PathType Leaf) { $s } } } catch { }
+        }
+    } catch { }
+}
+function Get-FullDir([string]$d) { $f = [IO.Path]::GetFullPath($d); if ($f.Length -gt 3) { $f = $f.TrimEnd('\') }; $f }
+# 玩家貼上或拖進視窗的位置：去掉前後的引號和空白；是捷徑就看它指向哪裡；是檔案（例如 kl2.exe）就取所在的資料夾；
+# 是遊戲資料夾的上一層（例如 D:\GOG Games）就往下找一層。找不到回傳 $null。
+function Resolve-GamePath([string]$s) {
+    $p = "$s".Trim().Trim([char]34, [char]39, [char]0x201C, [char]0x201D, [char]0x3000, ' ')
+    if (-not $p) { return $null }
+    try {
+        if ($p -like '*.lnk' -and (Test-Path -LiteralPath $p -PathType Leaf)) { $t = (New-Object -ComObject WScript.Shell).CreateShortcut($p).TargetPath; if ($t) { $p = $t } }
+        if (Test-Path -LiteralPath $p -PathType Leaf) { $p = [IO.Path]::GetDirectoryName($p) }
+        if (Test-Path -LiteralPath (Join-PathSafe $p 'kl2.exe') -PathType Leaf) { return (Get-FullDir $p) }
+        $sub = @(Find-GameIn $p)
+        if ($sub.Count -eq 1) { return (Get-FullDir $sub[0]) }
+    } catch { }
+    return $null
+}
 function Get-GameCandidates {
     $c = New-Object System.Collections.Generic.List[string]
     try {
@@ -52,7 +78,9 @@ function Get-GameCandidates {
     foreach ($dr in [IO.DriveInfo]::GetDrives()) {
         if ($dr.DriveType -ne 'Fixed' -or -not $dr.IsReady) { continue }
         $r = $dr.RootDirectory.FullName
-        foreach ($sub in $GogFolder, ('GOG Games\' + $GogFolder), ('GOG Galaxy\Games\' + $GogFolder), ('Program Files (x86)\GOG Galaxy\Games\' + $GogFolder)) { $c.Add((Join-PathSafe $r $sub)) }
+        foreach ($sub in '', 'GOG Games', 'GOG Galaxy\Games', 'Program Files (x86)\GOG Galaxy\Games', 'Program Files\GOG Galaxy\Games', 'Games', 'SteamLibrary\steamapps\common') {
+            foreach ($d in @(Find-GameIn (Join-PathSafe $r $sub) $GogPattern)) { $c.Add($d) }
+        }
     }
     $seen = @{}
     foreach ($d in $c) {
@@ -63,8 +91,9 @@ function Get-GameCandidates {
 }
 function Find-GameDir {
     if ($GameDir) {
-        if (Test-Path -LiteralPath (Join-PathSafe $GameDir 'kl2.exe')) { return (Resolve-Path -LiteralPath $GameDir).Path }
-        throw '指定的資料夾裡沒有 kl2.exe。'
+        $d = Resolve-GamePath $GameDir
+        if ($d) { return $d }
+        throw ('指定的位置找不到 kl2.exe：' + $GameDir)
     }
     $up = Split-Path -Parent $Root
     if ($up -and (Test-Path -LiteralPath (Join-PathSafe $up 'kl2.exe'))) { return $up }
@@ -77,9 +106,16 @@ function Find-GameDir {
         if ([int]::TryParse((Read-Host '請輸入編號').Trim(), [ref]$n) -and $n -ge 1 -and $n -le $list.Count) { return $list[$n - 1] }
         throw '沒有選擇遊戲資料夾。'
     }
-    $p = (Read-Host '找不到遊戲資料夾，請貼上路徑（裡面要有 kl2.exe）').Trim('"', ' ')
-    if (Test-Path -LiteralPath (Join-PathSafe $p 'kl2.exe')) { return $p }
-    throw '這個資料夾裡沒有 kl2.exe。'
+    # 資料夾、kl2.exe、捷徑都收；輸入錯了可以重來
+    Write-Host '找不到遊戲資料夾。請把 kl2.exe 拖進這個視窗（或貼上遊戲資料夾的路徑），再按 Enter。'
+    while ($true) {
+        $in = Read-Host '遊戲位置'
+        if (-not "$in".Trim()) { throw '沒有指定遊戲資料夾。' }
+        $d = Resolve-GamePath $in
+        if ($d) { return $d }
+        Write-Host ('這個位置找不到 kl2.exe：' + "$in".Trim()) -ForegroundColor Yellow
+        Write-Host '請再試一次，或直接按 Enter 結束。'
+    }
 }
 function Get-Sha([string]$p) { (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLowerInvariant() }
 function Get-ShaBytes([byte[]]$b) { $h = [Security.Cryptography.SHA256]::Create(); ([BitConverter]::ToString($h.ComputeHash($b)) -replace '-', '').ToLowerInvariant() }
